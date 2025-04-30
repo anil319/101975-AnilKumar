@@ -1,0 +1,19 @@
+# Development Environment Pipeline
+# This pipeline uses the main template with dev-specific parameters
+
+# Extend the main template
+extends:
+  template: terraform-cicd-pipeline.yml
+  parameters:
+    environment: dev
+    terraformVersion: '1.5.7'
+    awsRegion: 'us-west-2'
+    runSonarQube: true
+    runSnyk: true
+    slackNotifications: true
+    blueGreenDeployment: false  # Simplified deployment for dev environment
+
+# Additional dev-specific configurations can be added here
+variables:
+  - name: DevSpecificVar
+    value: 'DevValue'

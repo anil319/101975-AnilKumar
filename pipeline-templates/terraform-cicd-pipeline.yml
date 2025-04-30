@@ -1,0 +1,634 @@
+# Terraform CI/CD Pipeline Template
+# Features:
+# - Build, Test, and Deploy stages
+# - SonarQube for code quality
+# - Snyk for security scans
+# - Centralized secrets management
+# - Approval gates
+# - Slack notifications
+# - Parallel jobs
+# - Blue-green deployment strategy
+
+# Pipeline parameters
+parameters:
+  - name: environment
+    displayName: Environment
+    type: string
+    default: dev
+    values:
+      - dev
+      - prod
+  - name: terraformVersion
+    displayName: Terraform Version
+    type: string
+    default: '1.5.7'
+  - name: awsRegion
+    displayName: AWS Region
+    type: string
+    default: 'us-west-2'
+  - name: runSonarQube
+    displayName: Run SonarQube Analysis
+    type: boolean
+    default: true
+  - name: runSnyk
+    displayName: Run Snyk Security Scan
+    type: boolean
+    default: true
+  - name: slackNotifications
+    displayName: Send Slack Notifications
+    type: boolean
+    default: true
+  - name: blueGreenDeployment
+    displayName: Use Blue-Green Deployment
+    type: boolean
+    default: true
+
+# Variables
+variables:
+  - name: terraformDirectory
+    value: '$(System.DefaultWorkingDirectory)/environments/${{ parameters.environment }}'
+  - name: terraformStateKey
+    value: 'ecs-cluster/${{ parameters.environment }}/terraform.tfstate'
+  - name: sonarProjectKey
+    value: 'terraform-ecs-${{ parameters.environment }}'
+  - name: sonarProjectName
+    value: 'Terraform ECS ${{ parameters.environment }}'
+  - group: terraform-secrets # Centralized secret group
+
+# Trigger configuration
+trigger:
+  branches:
+    include:
+      - main
+      - develop
+  paths:
+    include:
+      - '**/*.tf'
+      - 'environments/**/*'
+      - 'modules/**/*'
+    exclude:
+      - '**/*.md'
+
+# Resources
+resources:
+  repositories:
+    - repository: templates
+      type: git
+      name: DevOps/pipeline-templates
+      ref: refs/heads/main
+
+# Stages
+stages:
+  ##############
+  # Build Stage
+  ##############
+  - stage: Build
+    displayName: 'Build'
+    jobs:
+      - job: Validation
+        displayName: 'Terraform and YAML Validation'
+        pool:
+          vmImage: 'ubuntu-latest'
+        steps:
+          - task: UseTerraformVersion@0
+            displayName: 'Install Terraform'
+            inputs:
+              terraformVersion: ${{ parameters.terraformVersion }}
+          
+          # Run comprehensive Terraform validation
+          - script: |
+              chmod +x ./scripts/validate-terraform.sh
+              ./scripts/validate-terraform.sh
+            displayName: 'Validate Terraform Configuration'
+            workingDirectory: '$(System.DefaultWorkingDirectory)'
+          
+          # Run YAML validation
+          - script: |
+              chmod +x ./scripts/validate-yaml.sh
+              ./scripts/validate-yaml.sh
+            displayName: 'Validate YAML Files'
+            workingDirectory: '$(System.DefaultWorkingDirectory)'
+          
+          # Publish validation results
+          - task: PublishBuildArtifacts@1
+            displayName: 'Publish Terraform Files'
+            inputs:
+              pathToPublish: '$(System.DefaultWorkingDirectory)'
+              artifactName: 'terraform-code'
+      
+      - job: CodeQuality
+        displayName: 'Code Quality Analysis'
+        dependsOn: []  # Run in parallel with Validation
+        condition: eq('${{ parameters.runSonarQube }}', true)
+        pool:
+          vmImage: 'ubuntu-latest'
+        steps:
+          - task: SonarQubePrepare@5
+            displayName: 'Prepare SonarQube Analysis'
+            inputs:
+              SonarQube: 'SonarQube'
+              scannerMode: 'CLI'
+              configMode: 'manual'
+              cliProjectKey: '$(sonarProjectKey)'
+              cliProjectName: '$(sonarProjectName)'
+              cliSources: '.'
+              extraProperties: |
+                sonar.exclusions=**/*.md
+                sonar.terraform.file.suffixes=.tf
+                sonar.terraform.activate=true
+          
+          - task: SonarQubeAnalyze@5
+            displayName: 'Run SonarQube Analysis'
+          
+          - task: SonarQubePublish@5
+            displayName: 'Publish SonarQube Results'
+            inputs:
+              pollingTimeoutSec: '300'
+      
+      - job: SecurityScan
+        displayName: 'Security Scan'
+        dependsOn: []  # Run in parallel with Validation and CodeQuality
+        condition: eq('${{ parameters.runSnyk }}', true)
+        pool:
+          vmImage: 'ubuntu-latest'
+        steps:
+          - task: SnykSecurityScan@1
+            displayName: 'Snyk Security Scan'
+            inputs:
+              serviceConnectionEndpoint: 'Snyk'
+              testType: 'app'
+              monitorWhen: 'always'
+              failOnIssues: false
+              projectName: '$(Build.Repository.Name)-${{ parameters.environment }}'
+              organization: '$(SnykOrganization)'
+          
+          # Publish Snyk report
+          - task: PublishBuildArtifacts@1
+            displayName: 'Publish Snyk Report'
+            inputs:
+              pathToPublish: '$(Build.SourcesDirectory)/snyk-report.html'
+              artifactName: 'snyk-report'
+
+  ##############
+  # Documentation Stage
+  ##############
+  - stage: Documentation
+    displayName: 'Documentation'
+    dependsOn: Build
+    jobs:
+      - job: GenerateDocumentation
+        displayName: 'Generate Documentation'
+        pool:
+          vmImage: 'ubuntu-latest'
+        steps:
+          - task: UseTerraformVersion@0
+            displayName: 'Install Terraform'
+            inputs:
+              terraformVersion: ${{ parameters.terraformVersion }}
+          
+          # Generate documentation
+          - script: |
+              chmod +x ./scripts/generate-docs.sh
+              ./scripts/generate-docs.sh
+            displayName: 'Generate Documentation'
+            workingDirectory: '$(System.DefaultWorkingDirectory)'
+          
+          # Publish documentation artifacts
+          - task: PublishBuildArtifacts@1
+            displayName: 'Publish Documentation'
+            inputs:
+              pathToPublish: '$(System.DefaultWorkingDirectory)/docs'
+              artifactName: 'terraform-docs'
+          
+          # Optionally commit documentation changes back to the repository
+          # This step is commented out as it requires additional setup
+          # - script: |
+          #     git config --global user.email "pipeline@example.com"
+          #     git config --global user.name "CI Pipeline"
+          #     git add docs/ modules/*/README.md environments/*/README.md README.md
+          #     git commit -m "Update documentation [skip ci]" || echo "No changes to commit"
+          #     git push origin HEAD:$(Build.SourceBranch)
+          #   displayName: 'Commit Documentation Changes'
+          #   workingDirectory: '$(System.DefaultWorkingDirectory)'
+          #   condition: and(succeeded(), eq(variables['Build.SourceBranch'], 'refs/heads/main'))
+
+  ##############
+  # Test Stage
+  ##############
+  - stage: Test
+    displayName: 'Test'
+    dependsOn: 
+      - Build
+      - Documentation
+    jobs:
+      - job: TerraformPlan
+        displayName: 'Terraform Plan'
+        pool:
+          vmImage: 'ubuntu-latest'
+        steps:
+          - task: UseTerraformVersion@0
+            displayName: 'Install Terraform'
+            inputs:
+              terraformVersion: ${{ parameters.terraformVersion }}
+          
+          # Configure AWS credentials from centralized secrets
+          - task: AWSShellScript@1
+            displayName: 'Configure AWS Credentials'
+            inputs:
+              awsCredentials: 'AWS-Terraform-ServiceConnection'
+              regionName: ${{ parameters.awsRegion }}
+              scriptType: 'inline'
+              inlineScript: |
+                aws sts get-caller-identity
+          
+          # Initialize Terraform with backend
+          - script: |
+              terraform init \
+                -backend-config="bucket=$(TerraformStateBucket)" \
+                -backend-config="key=$(terraformStateKey)" \
+                -backend-config="region=${{ parameters.awsRegion }}" \
+                -backend-config="dynamodb_table=$(TerraformLockTable)" \
+                -backend-config="encrypt=true"
+            displayName: 'Terraform Init'
+            workingDirectory: '$(terraformDirectory)'
+            env:
+              AWS_ACCESS_KEY_ID: $(AWS_ACCESS_KEY_ID)
+              AWS_SECRET_ACCESS_KEY: $(AWS_SECRET_ACCESS_KEY)
+          
+          # Run Terraform plan
+          - script: |
+              terraform plan -out=tfplan
+            displayName: 'Terraform Plan'
+            workingDirectory: '$(terraformDirectory)'
+            env:
+              AWS_ACCESS_KEY_ID: $(AWS_ACCESS_KEY_ID)
+              AWS_SECRET_ACCESS_KEY: $(AWS_SECRET_ACCESS_KEY)
+              TF_VAR_sns_email_list: $(SNS_EMAIL_LIST)
+          
+          # Convert plan to JSON for analysis
+          - script: |
+              terraform show -json tfplan > tfplan.json
+            displayName: 'Convert Plan to JSON'
+            workingDirectory: '$(terraformDirectory)'
+          
+          # Run checkov for security and compliance scanning
+          - script: |
+              pip install checkov
+              checkov -f tfplan.json -o junitxml > checkov-report.xml || true
+            displayName: 'Run Checkov Scan'
+            workingDirectory: '$(terraformDirectory)'
+          
+          # Publish test results
+          - task: PublishTestResults@2
+            displayName: 'Publish Checkov Results'
+            inputs:
+              testResultsFormat: 'JUnit'
+              testResultsFiles: '**/checkov-report.xml'
+              testRunTitle: 'Checkov Scan'
+              failTaskOnFailedTests: false
+          
+          # Publish plan artifacts
+          - task: PublishBuildArtifacts@1
+            displayName: 'Publish Terraform Plan'
+            inputs:
+              pathToPublish: '$(terraformDirectory)/tfplan'
+              artifactName: 'terraform-plan'
+      
+      # Run unit tests if they exist
+      - job: UnitTests
+        displayName: 'Unit Tests'
+        dependsOn: []  # Run in parallel with TerraformPlan
+        pool:
+          vmImage: 'ubuntu-latest'
+        steps:
+          - script: |
+              if [ -d "$(System.DefaultWorkingDirectory)/tests" ]; then
+                cd $(System.DefaultWorkingDirectory)/tests
+                go test -v ./... -coverprofile=coverage.out
+              else
+                echo "No tests directory found. Skipping unit tests."
+              fi
+            displayName: 'Run Unit Tests'
+            continueOnError: true
+          
+          # Publish test results if they exist
+          - task: PublishTestResults@2
+            displayName: 'Publish Unit Test Results'
+            inputs:
+              testResultsFormat: 'JUnit'
+              testResultsFiles: '**/test-results.xml'
+              testRunTitle: 'Unit Tests'
+              failTaskOnFailedTests: false
+            continueOnError: true
+      
+      # Send notification on test completion
+      - job: NotifyTestCompletion
+        displayName: 'Notify Test Completion'
+        dependsOn: 
+          - TerraformPlan
+          - UnitTests
+        condition: and(succeeded(), eq('${{ parameters.slackNotifications }}', true))
+        pool:
+          vmImage: 'ubuntu-latest'
+        steps:
+          - task: SlackNotification@3
+            displayName: 'Send Slack Notification'
+            inputs:
+              ConnectionName: 'SlackConnection'
+              Method: 'POST'
+              Message: |
+                Test stage completed for Terraform ECS deployment (${{ parameters.environment }})
+                Build: $(Build.BuildNumber)
+                Status: $(Agent.JobStatus)
+                See details: $(System.TeamFoundationCollectionUri)$(System.TeamProject)/_build/results?buildId=$(Build.BuildId)
+              Channel: '$(SlackChannel)'
+              TeamName: '$(SlackTeam)'
+
+  ##############
+  # Deploy Stage
+  ##############
+  - stage: Deploy
+    displayName: 'Deploy'
+    dependsOn: Test
+    condition: succeeded()
+    jobs:
+      # Approval gate for production deployments
+      - job: ApprovalGate
+        displayName: 'Approval Gate'
+        pool: server
+        timeoutInMinutes: 4320 # 3 days
+        condition: eq('${{ parameters.environment }}', 'prod')
+        steps:
+          - task: ManualValidation@0
+            displayName: 'Wait for manual approval'
+            inputs:
+              notifyUsers: '$(ApproverEmails)'
+              instructions: 'Please validate the Terraform plan and approve the deployment to production.'
+              onTimeout: 'reject'
+      
+      # Blue-Green Deployment Setup
+      - job: BlueGreenSetup
+        displayName: 'Blue-Green Setup'
+        dependsOn: ApprovalGate
+        condition: and(succeeded(), eq('${{ parameters.blueGreenDeployment }}', true))
+        pool:
+          vmImage: 'ubuntu-latest'
+        steps:
+          - task: UseTerraformVersion@0
+            displayName: 'Install Terraform'
+            inputs:
+              terraformVersion: ${{ parameters.terraformVersion }}
+          
+          # Configure AWS credentials from centralized secrets
+          - task: AWSShellScript@1
+            displayName: 'Configure AWS Credentials'
+            inputs:
+              awsCredentials: 'AWS-Terraform-ServiceConnection'
+              regionName: ${{ parameters.awsRegion }}
+              scriptType: 'inline'
+              inlineScript: |
+                aws sts get-caller-identity
+          
+          # Initialize Terraform with backend
+          - script: |
+              terraform init \
+                -backend-config="bucket=$(TerraformStateBucket)" \
+                -backend-config="key=$(terraformStateKey)" \
+                -backend-config="region=${{ parameters.awsRegion }}" \
+                -backend-config="dynamodb_table=$(TerraformLockTable)" \
+                -backend-config="encrypt=true"
+            displayName: 'Terraform Init'
+            workingDirectory: '$(terraformDirectory)'
+            env:
+              AWS_ACCESS_KEY_ID: $(AWS_ACCESS_KEY_ID)
+              AWS_SECRET_ACCESS_KEY: $(AWS_SECRET_ACCESS_KEY)
+          
+          # Determine current deployment color (blue or green)
+          - script: |
+              # Get current color from state or default to blue
+              CURRENT_COLOR=$(terraform output -raw current_deployment_color 2>/dev/null || echo "blue")
+              echo "Current deployment color: $CURRENT_COLOR"
+              
+              # Set target color (opposite of current)
+              if [ "$CURRENT_COLOR" == "blue" ]; then
+                TARGET_COLOR="green"
+              else
+                TARGET_COLOR="blue"
+              fi
+              echo "Target deployment color: $TARGET_COLOR"
+              
+              # Set variables for next steps
+              echo "##vso[task.setvariable variable=currentColor]$CURRENT_COLOR"
+              echo "##vso[task.setvariable variable=targetColor]$TARGET_COLOR"
+            displayName: 'Determine Deployment Colors'
+            workingDirectory: '$(terraformDirectory)'
+            env:
+              AWS_ACCESS_KEY_ID: $(AWS_ACCESS_KEY_ID)
+              AWS_SECRET_ACCESS_KEY: $(AWS_SECRET_ACCESS_KEY)
+      
+      # Standard Deployment (when blue-green is not enabled)
+      - job: StandardDeploy
+        displayName: 'Standard Deployment'
+        dependsOn: ApprovalGate
+        condition: and(succeeded(), eq('${{ parameters.blueGreenDeployment }}', false))
+        pool:
+          vmImage: 'ubuntu-latest'
+        steps:
+          - task: UseTerraformVersion@0
+            displayName: 'Install Terraform'
+            inputs:
+              terraformVersion: ${{ parameters.terraformVersion }}
+          
+          # Configure AWS credentials from centralized secrets
+          - task: AWSShellScript@1
+            displayName: 'Configure AWS Credentials'
+            inputs:
+              awsCredentials: 'AWS-Terraform-ServiceConnection'
+              regionName: ${{ parameters.awsRegion }}
+              scriptType: 'inline'
+              inlineScript: |
+                aws sts get-caller-identity
+          
+          # Download terraform plan
+          - task: DownloadBuildArtifacts@0
+            displayName: 'Download Terraform Plan'
+            inputs:
+              buildType: 'current'
+              downloadType: 'single'
+              artifactName: 'terraform-plan'
+              downloadPath: '$(terraformDirectory)'
+          
+          # Initialize Terraform with backend
+          - script: |
+              terraform init \
+                -backend-config="bucket=$(TerraformStateBucket)" \
+                -backend-config="key=$(terraformStateKey)" \
+                -backend-config="region=${{ parameters.awsRegion }}" \
+                -backend-config="dynamodb_table=$(TerraformLockTable)" \
+                -backend-config="encrypt=true"
+            displayName: 'Terraform Init'
+            workingDirectory: '$(terraformDirectory)'
+            env:
+              AWS_ACCESS_KEY_ID: $(AWS_ACCESS_KEY_ID)
+              AWS_SECRET_ACCESS_KEY: $(AWS_SECRET_ACCESS_KEY)
+          
+          # Apply terraform plan
+          - script: |
+              terraform apply -auto-approve tfplan
+            displayName: 'Terraform Apply'
+            workingDirectory: '$(terraformDirectory)'
+            env:
+              AWS_ACCESS_KEY_ID: $(AWS_ACCESS_KEY_ID)
+              AWS_SECRET_ACCESS_KEY: $(AWS_SECRET_ACCESS_KEY)
+              TF_VAR_sns_email_list: $(SNS_EMAIL_LIST)
+      
+      # Blue-Green Deployment - Deploy to target environment
+      - job: BlueGreenDeploy
+        displayName: 'Blue-Green Deployment'
+        dependsOn: BlueGreenSetup
+        condition: and(succeeded(), eq('${{ parameters.blueGreenDeployment }}', true))
+        pool:
+          vmImage: 'ubuntu-latest'
+        variables:
+          targetColor: $[ dependencies.BlueGreenSetup.outputs['determineColors.targetColor'] ]
+        steps:
+          - task: UseTerraformVersion@0
+            displayName: 'Install Terraform'
+            inputs:
+              terraformVersion: ${{ parameters.terraformVersion }}
+          
+          # Configure AWS credentials from centralized secrets
+          - task: AWSShellScript@1
+            displayName: 'Configure AWS Credentials'
+            inputs:
+              awsCredentials: 'AWS-Terraform-ServiceConnection'
+              regionName: ${{ parameters.awsRegion }}
+              scriptType: 'inline'
+              inlineScript: |
+                aws sts get-caller-identity
+          
+          # Initialize Terraform with backend
+          - script: |
+              terraform init \
+                -backend-config="bucket=$(TerraformStateBucket)" \
+                -backend-config="key=$(terraformStateKey)" \
+                -backend-config="region=${{ parameters.awsRegion }}" \
+                -backend-config="dynamodb_table=$(TerraformLockTable)" \
+                -backend-config="encrypt=true"
+            displayName: 'Terraform Init'
+            workingDirectory: '$(terraformDirectory)'
+            env:
+              AWS_ACCESS_KEY_ID: $(AWS_ACCESS_KEY_ID)
+              AWS_SECRET_ACCESS_KEY: $(AWS_SECRET_ACCESS_KEY)
+          
+          # Deploy to target color
+          - script: |
+              # Apply with target color variable
+              terraform apply -auto-approve \
+                -var="deployment_color=$(targetColor)" \
+                -var="enable_blue_green_deployment=true" \
+                -var="blue_green_deployment_state=preparing"
+            displayName: 'Deploy to $(targetColor) Environment'
+            workingDirectory: '$(terraformDirectory)'
+            env:
+              AWS_ACCESS_KEY_ID: $(AWS_ACCESS_KEY_ID)
+              AWS_SECRET_ACCESS_KEY: $(AWS_SECRET_ACCESS_KEY)
+              TF_VAR_sns_email_list: $(SNS_EMAIL_LIST)
+      
+      # Blue-Green Deployment - Test target environment
+      - job: BlueGreenTest
+        displayName: 'Test Target Environment'
+        dependsOn: BlueGreenDeploy
+        condition: and(succeeded(), eq('${{ parameters.blueGreenDeployment }}', true))
+        pool:
+          vmImage: 'ubuntu-latest'
+        steps:
+          - script: |
+              # Get target environment URL from Terraform output
+              TARGET_URL=$(terraform output -raw ${TARGET_COLOR}_environment_url)
+              
+              # Run health checks against target environment
+              curl -f $TARGET_URL/health || exit 1
+              
+              # Additional tests can be added here
+              echo "Target environment health checks passed"
+            displayName: 'Run Health Checks'
+            workingDirectory: '$(terraformDirectory)'
+            env:
+              AWS_ACCESS_KEY_ID: $(AWS_ACCESS_KEY_ID)
+              AWS_SECRET_ACCESS_KEY: $(AWS_SECRET_ACCESS_KEY)
+              TARGET_COLOR: $(targetColor)
+      
+      # Blue-Green Deployment - Switch traffic
+      - job: BlueGreenSwitch
+        displayName: 'Switch Traffic'
+        dependsOn: BlueGreenTest
+        condition: and(succeeded(), eq('${{ parameters.blueGreenDeployment }}', true))
+        pool:
+          vmImage: 'ubuntu-latest'
+        steps:
+          - task: UseTerraformVersion@0
+            displayName: 'Install Terraform'
+            inputs:
+              terraformVersion: ${{ parameters.terraformVersion }}
+          
+          # Configure AWS credentials from centralized secrets
+          - task: AWSShellScript@1
+            displayName: 'Configure AWS Credentials'
+            inputs:
+              awsCredentials: 'AWS-Terraform-ServiceConnection'
+              regionName: ${{ parameters.awsRegion }}
+              scriptType: 'inline'
+              inlineScript: |
+                aws sts get-caller-identity
+          
+          # Initialize Terraform with backend
+          - script: |
+              terraform init \
+                -backend-config="bucket=$(TerraformStateBucket)" \
+                -backend-config="key=$(terraformStateKey)" \
+                -backend-config="region=${{ parameters.awsRegion }}" \
+                -backend-config="dynamodb_table=$(TerraformLockTable)" \
+                -backend-config="encrypt=true"
+            displayName: 'Terraform Init'
+            workingDirectory: '$(terraformDirectory)'
+            env:
+              AWS_ACCESS_KEY_ID: $(AWS_ACCESS_KEY_ID)
+              AWS_SECRET_ACCESS_KEY: $(AWS_SECRET_ACCESS_KEY)
+          
+          # Switch traffic to target environment
+          - script: |
+              # Apply with target color as active
+              terraform apply -auto-approve \
+                -var="deployment_color=$(targetColor)" \
+                -var="enable_blue_green_deployment=true" \
+                -var="blue_green_deployment_state=active"
+            displayName: 'Switch Traffic to $(targetColor)'
+            workingDirectory: '$(terraformDirectory)'
+            env:
+              AWS_ACCESS_KEY_ID: $(AWS_ACCESS_KEY_ID)
+              AWS_SECRET_ACCESS_KEY: $(AWS_SECRET_ACCESS_KEY)
+              TF_VAR_sns_email_list: $(SNS_EMAIL_LIST)
+      
+      # Send notification on deployment completion
+      - job: NotifyDeploymentCompletion
+        displayName: 'Notify Deployment Completion'
+        dependsOn:
+          - StandardDeploy
+          - BlueGreenSwitch
+        condition: and(succeeded(), eq('${{ parameters.slackNotifications }}', true))
+        pool:
+          vmImage: 'ubuntu-latest'
+        steps:
+          - task: SlackNotification@3
+            displayName: 'Send Slack Notification'
+            inputs:
+              ConnectionName: 'SlackConnection'
+              Method: 'POST'
+              Message: |
+                :white_check_mark: Deployment completed successfully for Terraform ECS (${{ parameters.environment }})
+                Build: $(Build.BuildNumber)
+                Status: $(Agent.JobStatus)
+                See details: $(System.TeamFoundationCollectionUri)$(System.TeamProject)/_build/results?buildId=$(Build.BuildId)
+              Channel: '$(SlackChannel)'
+              TeamName: '$(SlackTeam)'

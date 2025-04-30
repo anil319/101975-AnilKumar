@@ -1,0 +1,19 @@
+# Production Environment Pipeline
+# This pipeline uses the main template with prod-specific parameters
+
+# Extend the main template
+extends:
+  template: terraform-cicd-pipeline.yml
+  parameters:
+    environment: prod
+    terraformVersion: '1.5.7'
+    awsRegion: 'us-west-2'
+    runSonarQube: true
+    runSnyk: true
+    slackNotifications: true
+    blueGreenDeployment: true  # Use blue-green deployment for zero downtime in production
+
+# Additional prod-specific configurations can be added here
+variables:
+  - name: ProdSpecificVar
+    value: 'ProdValue'

@@ -1,0 +1,21 @@
+# environments/prod/terraform.tfvars.example - Example variable values for prod environment
+# Copy this file to terraform.tfvars and update with your values
+
+# General configuration
+project_name = "my-ecs-app"
+aws_region   = "us-west-2"
+
+# Networking configuration
+vpc_cidr             = "10.0.0.0/16"
+availability_zones   = ["us-west-2a", "us-west-2b", "us-west-2c"]
+public_subnet_cidrs  = ["10.0.1.0/24", "10.0.2.0/24", "10.0.3.0/24"]
+private_subnet_cidrs = ["10.0.11.0/24", "10.0.12.0/24", "10.0.13.0/24"]
+
+# Container configuration
+container_name     = "my-app"
+container_image    = "123456789012.dkr.ecr.us-west-2.amazonaws.com/my-app:prod"
+container_port     = 8080
+health_check_path  = "/health"
+
+# Monitoring configuration
+# sns_email_list = ["prod-alerts@example.com", "oncall@example.com"]
